@@ -10,8 +10,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/shurcooL/go-goon"
 )
 
 type DirWatcher struct {
@@ -23,10 +21,10 @@ type DirWatcher struct {
 	InitialReadDone chan bool
 }
 
-func NewDirWatcher(dirpath string) *DirWatcher {
+func NewDirWatcher(dirpath string, udc chan string) *DirWatcher {
 	return &DirWatcher{
 		Dirpath:         dirpath,
-		UpdateDir:       make(chan string),
+		UpdateDir:       udc,
 		Errchan:         make(chan error),
 		RequestStop:     make(chan bool),
 		Done:            make(chan bool),
@@ -59,11 +57,8 @@ func (w *DirWatcher) Start() {
 					return
 				}
 
-				fmt.Printf("stat = %#v  for w.Dirpath='%s'\n", stat, w.Dirpath)
-
 				if stat.Size() != dirstat.Size() || stat.ModTime() != dirstat.ModTime() {
 					dirstat = stat
-					fmt.Printf("noticed difference from original dirstat[%#v] vs stat[%#v]\n", dirstat, stat)
 					w.UpdateDir <- w.Dirpath
 				} else {
 					newfiles, err := ioutil.ReadDir(w.Dirpath)
@@ -93,11 +88,6 @@ func (w *DirWatcher) Start() {
 							continue
 						}
 					}
-					fmt.Printf("No differences between origfiles[%#v] and newfiles[%#v] found\n", origfiles, newfiles)
-					fmt.Printf("origfiles:\n")
-					goon.Dump(origfiles)
-					fmt.Printf("newfiles:\n")
-					goon.Dump(newfiles)
 				}
 
 				time.Sleep(1 * time.Second)
@@ -119,10 +109,10 @@ func main() {
 }
 
 type Gavelin struct {
-	RootPath      string
-	RootDirHandle *os.File
-	RequestStop   chan bool
-	Done          chan bool
+	RootPath    string
+	RequestStop chan bool
+	Done        chan bool
+	UpdateDir   chan string // Watchers send on this to tell the root displayer to update a path
 
 	Watcher *DirWatcher
 
@@ -137,17 +127,14 @@ func NewGavelin(path string) *Gavelin {
 			panic(fmt.Errorf("root file path not found: '%s' and could not be created: '%s'", path, err))
 		}
 	}
-	rootdirhandle, err := os.Open(path)
-	if err != nil {
-		panic(fmt.Errorf("root file path '%s' could not be opened, error: '%s'", path, err))
-	}
 
+	udc := make(chan string)
 	return &Gavelin{
-		RootPath:      path,
-		RootDirHandle: rootdirhandle,
-		RequestStop:   make(chan bool),
-		Done:          make(chan bool),
-		Watcher:       NewDirWatcher(path),
+		RootPath:    path,
+		RequestStop: make(chan bool),
+		Done:        make(chan bool),
+		UpdateDir:   udc,
+		Watcher:     NewDirWatcher(path, udc),
 	}
 }
 
@@ -158,16 +145,14 @@ func (g *Gavelin) Start() {
 		for {
 			select {
 			case err := <-g.Watcher.Errchan:
-				fmt.Printf("got err on g.Errchan from watcher: '%s'\n", err)
+				fmt.Printf("got err on g.Errchan from watcher for dirpath '%s': error is '%s'\n", g.Watcher.Dirpath, err)
 
 			case udir := <-g.Watcher.UpdateDir:
-				fmt.Printf("UpdateDir signaled with: '%s'\n", udir)
-				g.Update()
+				g.Update(udir)
 
 			case <-g.RequestStop:
 				g.Watcher.RequestStop <- true
 				<-g.Watcher.Done
-				g.RootDirHandle.Close()
 				close(g.Done)
 				return
 			}
@@ -181,7 +166,7 @@ func (g *Gavelin) Stop() {
 }
 
 func (g *Gavelin) DisplayedPngCount() int {
-	g.Update()
+	g.Update(g.RootPath)
 	return g.PngCount
 }
 
@@ -191,20 +176,24 @@ func (f byName) Len() int           { return len(f) }
 func (f byName) Less(i, j int) bool { return f[i].Name() < f[j].Name() }
 func (f byName) Swap(i, j int)      { f[i], f[j] = f[j], f[i] }
 
-func (g *Gavelin) Update() {
-	fmt.Printf("Update called.\n")
-	flist, err := g.RootDirHandle.Readdir(-1)
+func (g *Gavelin) Update(path string) {
+
+	rootdirhandle, err := os.Open(g.RootPath)
+	if err != nil {
+		panic(fmt.Errorf("root file path '%s' could not be opened, error: '%s'", g.RootPath, err))
+	}
+	defer rootdirhandle.Close()
+
+	flist, err := rootdirhandle.Readdir(-1)
 	if err != nil {
 		panic(fmt.Errorf("call to Readdir() on root file path '%s' failed: '%s'", g.RootPath, err))
 	}
 	g.PngCount = 0
 	g.SubDirCount = 0
-	fmt.Printf("size of flist: %d\n", len(flist))
 
 	sort.Sort(byName(flist))
 
 	for i := range flist {
-		fmt.Printf("Update on rootdir '%s' sees dir entry '%s'\n", g.RootPath, flist[i].Name())
 		if !flist[i].IsDir() {
 			if strings.HasSuffix(flist[i].Name(), ".png") {
 				g.PngCount++
@@ -216,7 +205,7 @@ func (g *Gavelin) Update() {
 }
 
 func (g *Gavelin) DirCount() int {
-	g.Update()
+	g.Update(g.RootPath)
 	return g.SubDirCount
 }
 
