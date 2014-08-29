@@ -13,22 +13,24 @@ import (
 )
 
 type DirWatcher struct {
-	Dirpath         string
-	UpdateDir       chan string
-	Errchan         chan error
-	RequestStop     chan bool
-	Done            chan bool
-	InitialReadDone chan bool
+	Dirpath                    string
+	UpdateDir                  chan string
+	Errchan                    chan error
+	RequestStop                chan bool
+	Done                       chan bool
+	InitialReadDone            chan bool
+	UpdateIntervalMilliseconds int
 }
 
-func NewDirWatcher(dirpath string, udc chan string) *DirWatcher {
+func NewDirWatcher(dirpath string, udc chan string, updateMsec int) *DirWatcher {
 	return &DirWatcher{
-		Dirpath:         dirpath,
-		UpdateDir:       udc,
-		Errchan:         make(chan error),
-		RequestStop:     make(chan bool),
-		Done:            make(chan bool),
-		InitialReadDone: make(chan bool),
+		Dirpath:                    dirpath,
+		UpdateDir:                  udc,
+		Errchan:                    make(chan error),
+		RequestStop:                make(chan bool),
+		Done:                       make(chan bool),
+		InitialReadDone:            make(chan bool),
+		UpdateIntervalMilliseconds: updateMsec,
 	}
 }
 
@@ -90,14 +92,14 @@ func (w *DirWatcher) Start() {
 					}
 				}
 
-				time.Sleep(1 * time.Second)
+				time.Sleep(time.Duration(w.UpdateIntervalMilliseconds) * time.Millisecond)
 			}
 		}
 	}()
 }
 
 func main() {
-	g := NewGavelin("gavelin")
+	g := NewGavelin("gavelin", 1000)
 	g.Start()
 	chStop := make(chan os.Signal, 2)
 	signal.Notify(chStop, os.Interrupt, syscall.SIGTERM)
@@ -116,11 +118,14 @@ type Gavelin struct {
 
 	Watcher *DirWatcher
 
-	PngCount    int
-	SubDirCount int
+	PngCount                   int
+	SubDirCount                int
+	SubDirList                 []string
+	SubFileNames               []string
+	UpdateIntervalMilliseconds int
 }
 
-func NewGavelin(path string) *Gavelin {
+func NewGavelin(path string, updateIntervalMilliseconds int) *Gavelin {
 	if !DirExists(path) {
 		err := os.MkdirAll(path, 0755)
 		if err != nil {
@@ -130,11 +135,12 @@ func NewGavelin(path string) *Gavelin {
 
 	udc := make(chan string)
 	return &Gavelin{
-		RootPath:    path,
-		RequestStop: make(chan bool),
-		Done:        make(chan bool),
-		UpdateDir:   udc,
-		Watcher:     NewDirWatcher(path, udc),
+		RootPath:                   path,
+		RequestStop:                make(chan bool),
+		Done:                       make(chan bool),
+		UpdateDir:                  udc,
+		Watcher:                    NewDirWatcher(path, udc, updateIntervalMilliseconds),
+		UpdateIntervalMilliseconds: updateIntervalMilliseconds,
 	}
 }
 
@@ -192,14 +198,18 @@ func (g *Gavelin) Update(path string) {
 	g.SubDirCount = 0
 
 	sort.Sort(byName(flist))
+	g.SubDirList = []string{}
+	g.SubFileNames = []string{}
 
 	for i := range flist {
 		if !flist[i].IsDir() {
 			if strings.HasSuffix(flist[i].Name(), ".png") {
 				g.PngCount++
 			}
+			g.SubFileNames = append(g.SubFileNames, flist[i].Name())
 		} else {
 			g.SubDirCount++
+			g.SubDirList = append(g.SubDirList, flist[i].Name())
 		}
 	}
 }
@@ -207,6 +217,16 @@ func (g *Gavelin) Update(path string) {
 func (g *Gavelin) DirCount() int {
 	g.Update(g.RootPath)
 	return g.SubDirCount
+}
+
+func (g *Gavelin) DirList() []string {
+	g.Update(g.RootPath)
+	return g.SubDirList
+}
+
+func (g *Gavelin) FileNames() []string {
+	g.Update(g.RootPath)
+	return g.SubFileNames
 }
 
 func GenerateNewPng(path string) {
